@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sheet AI — Gerador de Planilhas</title>
+<title>Sheet AI Ultra</title>
 <script src="https://unpkg.com/xlsx/dist/xlsx.full.min.js"></script>
 <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
 <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
@@ -11,42 +11,48 @@
 <style>
 :root{--bg:#fff;--fg:#000;--muted:#8a8a8a;--soft:#f2f2f2;--border:#e6e6e6;}
 body{margin:0;font-family:sans-serif;background:var(--bg);color:var(--fg);}
+header,footer{padding:1rem;border-bottom:1px solid var(--border);}
+header{position:sticky;top:0;background:rgba(255,255,255,0.95);}
+section{padding:1rem;}
+textarea,input{width:100%;padding:.5rem;border-radius:.5rem;border:1px solid var(--border);}
 .btn{border-radius:1rem;height:3rem;padding:0 1.25rem;font-weight:bold;cursor:pointer;}
 .btn-primary{background:#000;color:#fff;border:none;}
 .btn-muted{background:var(--soft);color:#000;border:none;}
 .card{border-radius:1rem;border:1px solid var(--border);padding:1rem;margin-bottom:1rem;}
-textarea,input{width:100%;padding:.5rem;border-radius:.5rem;border:1px solid var(--border);}
 table{border-collapse:collapse;width:100%;margin-top:1rem;}
 th,td{border:1px solid var(--border);padding:0.25rem;text-align:left;}
 thead{background:var(--soft);}
-.preview{max-height:200px;overflow:auto;border:1px solid var(--border);}
-header,footer{padding:1rem;border-bottom:1px solid var(--border);}
-header{position:sticky;top:0;background:rgba(255,255,255,0.95);}
-section{padding:1rem;}
+.preview{max-height:400px;overflow:auto;border:1px solid var(--border);}
+.flex{display:flex;gap:1rem;flex-wrap:wrap;}
+.flex-col{display:flex;flex-direction:column;}
+.filter{margin-top:0.5rem;margin-bottom:0.5rem;}
+.active-tab{font-weight:bold;text-decoration:underline;}
+.tab-list{display:flex;gap:1rem;margin-bottom:0.5rem;cursor:pointer;}
+input.editable{border:none;background:transparent;width:100%;padding:0;margin:0;}
 </style>
 </head>
 <body>
 <header>
-  <h1>Sheet AI <span style="font-size:0.8rem;color:var(--muted)">βeta</span></h1>
+  <h1>Sheet AI Ultra <span style="font-size:0.8rem;color:var(--muted)">βeta</span></h1>
 </header>
 <section>
   <div class="card">
-    <h2>Gerar Planilha</h2>
+    <h2>Gerar Planilha Avançada</h2>
     <textarea id="prompt" rows="4">Fluxo de caixa mensal com abas Receitas e Despesas, 12 meses, totais e gráfico de pizza.</textarea>
-    <div style="display:flex;gap:1rem;margin-top:0.5rem;">
-      <div>
+    <div class="flex" style="margin-top:0.5rem;">
+      <div class="flex-col">
         <label>Linhas</label>
         <input type="number" id="rows" value="20" min="1">
       </div>
-      <div>
+      <div class="flex-col">
         <label>Colunas</label>
         <input type="number" id="cols" value="6" min="1">
       </div>
-      <div>
+      <div class="flex-col">
         <label>Aba(s)</label>
-        <input type="text" id="sheetsInput" value="Principal">
+        <input type="text" id="sheetsInput" value="Principal, Receitas, Despesas">
       </div>
-      <div>
+      <div class="flex-col">
         <label><input type="checkbox" id="headers" checked> Incluir cabeçalho</label>
       </div>
     </div>
@@ -55,117 +61,160 @@ section{padding:1rem;}
       <button class="btn btn-muted" onclick="clearPrompt()">Limpar</button>
     </div>
   </div>
+
   <div class="card">
-    <h3>Preview</h3>
+    <h3>Preview Interativo & Editor</h3>
+    <div class="tab-list" id="tabList"></div>
+    <div class="filter">
+      <label>Filtrar valor: <input type="text" id="filterCol" placeholder="Digite valor para filtrar" oninput="renderPreview()"></label>
+    </div>
     <div id="preview" class="preview">Nenhuma planilha gerada ainda.</div>
     <button class="btn btn-primary" style="margin-top:0.5rem;" onclick="downloadXlsx()">Baixar XLSX</button>
+    <h4>Histórico local</h4>
+    <div id="history"></div>
   </div>
 </section>
 <footer>
-  © <span id="year"></span> Sheet AI
+  © <span id="year"></span> Sheet AI Ultra
 </footer>
 
 <script>
 document.getElementById('year').textContent = new Date().getFullYear();
 let currentSheets = [];
+let historySheets = [];
+let activeTab = 0;
+let RATE_LIMIT = { tokens: 10, last: Date.now() };
 
-// Normalização mínima de células
-function normalizeCell(v){return v===null||v===undefined?'':v;}
+function checkRateLimit(){
+  const now = Date.now();
+  RATE_LIMIT.tokens += (now - RATE_LIMIT.last)/2000;
+  RATE_LIMIT.last = now;
+  if(RATE_LIMIT.tokens > 10) RATE_LIMIT.tokens = 10;
+  if(RATE_LIMIT.tokens < 1) throw new Error('Rate limit excedido. Aguarde alguns segundos.');
+  RATE_LIMIT.tokens -=1;
+}
+
+function normalizeCell(v){
+  if(v===null||v===undefined) return '';
+  if(typeof v==='boolean') return v?'✔':'✖';
+  if(typeof v==='number') return v;
+  if(!isNaN(Date.parse(v))) return new Date(v).toLocaleDateString();
+  return String(v);
+}
 
 async function generateSheet(){
-  const prompt = document.getElementById('prompt').value.trim();
-  const rows = parseInt(document.getElementById('rows').value)||20;
-  const cols = parseInt(document.getElementById('cols').value)||6;
-  const headers = document.getElementById('headers').checked;
-  const sheetsInput = document.getElementById('sheetsInput').value.split(',').map(s=>s.trim()).filter(Boolean) || ['Principal'];
-  
-  document.getElementById('preview').textContent = 'Gerando...';
   try{
+    checkRateLimit();
+    const prompt = document.getElementById('prompt').value.trim();
+    const rows = parseInt(document.getElementById('rows').value)||20;
+    const cols = parseInt(document.getElementById('cols').value)||6;
+    const headers = document.getElementById('headers').checked;
+    const sheetsInput = document.getElementById('sheetsInput').value.split(',').map(s=>s.trim()).filter(Boolean) || ['Principal'];
+    document.getElementById('preview').textContent='Gerando...';
     const result = await generateSheetsFromAI(prompt,{rows,cols,headers,sheets:sheetsInput});
     currentSheets = result;
+    historySheets.push(JSON.parse(JSON.stringify(result)));
+    renderHistory();
+    renderTabList();
     renderPreview();
   }catch(e){
-    currentSheets = [{name:'Erro', headers:['Mensagem'], rows:[[e.message]]}];
+    currentSheets=[{name:'Erro', headers:['Mensagem'], rows:[[e.message]]}];
     renderPreview();
   }
 }
 
-function renderPreview(){
-  const container = document.getElementById('preview');
-  container.innerHTML = '';
-  currentSheets.forEach(sheet=>{
-    const div = document.createElement('div');
-    div.innerHTML = `<strong>${sheet.name}</strong>`;
-    const table = document.createElement('table');
-    if(sheet.headers.length){
-      const tr = document.createElement('tr');
-      sheet.headers.forEach(h=>{ const th=document.createElement('th'); th.textContent=h; tr.appendChild(th); });
-      table.appendChild(tr);
-    }
-    sheet.rows.slice(0,50).forEach(r=>{
-      const tr = document.createElement('tr');
-      r.forEach(c=>{ const td=document.createElement('td'); td.textContent=normalizeCell(c); tr.appendChild(td); });
-      table.appendChild(tr);
-    });
-    div.appendChild(table);
-    container.appendChild(div);
+function renderTabList(){
+  const tabList = document.getElementById('tabList');
+  tabList.innerHTML='';
+  currentSheets.forEach((sheet,i)=>{
+    const span=document.createElement('span');
+    span.textContent=sheet.name;
+    span.className=(i===activeTab)?'active-tab':'';
+    span.onclick=()=>{activeTab=i;renderPreview();};
+    tabList.appendChild(span);
   });
+}
+
+function renderPreview(){
+  const container=document.getElementById('preview');
+  container.innerHTML='';
+  if(!currentSheets[activeTab]) return;
+  const sheet=currentSheets[activeTab];
+  const filterVal=document.getElementById('filterCol').value.toLowerCase();
+  const table=document.createElement('table');
+  if(sheet.headers.length){
+    const tr=document.createElement('tr');
+    sheet.headers.forEach(h=>{ const th=document.createElement('th'); th.textContent=h; tr.appendChild(th); });
+    table.appendChild(tr);
+  }
+  sheet.rows.slice(0,100).forEach((r,rowIdx)=>{
+    if(filterVal && !r.some(c=>normalizeCell(c).toLowerCase().includes(filterVal))) return;
+    const tr=document.createElement('tr');
+    r.forEach((c,colIdx)=>{
+      const td=document.createElement('td');
+      const input=document.createElement('input');
+      input.value=normalizeCell(c);
+      input.className='editable';
+      input.oninput=(e)=>{currentSheets[activeTab].rows[rowIdx][colIdx]=e.target.value;};
+      td.appendChild(input);
+      tr.appendChild(td);
+    });
+    table.appendChild(tr);
+  });
+  container.appendChild(table);
 }
 
 function downloadXlsx(){
   if(!currentSheets.length) return;
-  const wb = XLSX.utils.book_new();
+  const wb=XLSX.utils.book_new();
   currentSheets.forEach(tab=>{
-    const aoa = [];
+    const aoa=[];
     if(tab.headers.length) aoa.push(tab.headers);
     tab.rows.forEach(r=>aoa.push(r.map(normalizeCell)));
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    XLSX.utils.book_append_sheet(wb, ws, tab.name.slice(0,31));
+    const ws=XLSX.utils.aoa_to_sheet(aoa);
+    XLSX.utils.book_append_sheet(wb,ws,tab.name.slice(0,31));
   });
-  const ts = new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
-  XLSX.writeFile(wb, `sheet-ai-${ts}.xlsx`);
+  const ts=new Date().toISOString().slice(0,19).replace(/[:T]/g,'-');
+  XLSX.writeFile(wb,`sheet-ai-ultra-${ts}.xlsx`);
 }
 
-function clearPrompt(){
-  document.getElementById('prompt').value='';
+function clearPrompt(){document.getElementById('prompt').value='';}
+
+function renderHistory(){
+  const container=document.getElementById('history');
+  container.innerHTML='';
+  historySheets.slice(-5).forEach((sheetSet,i)=>{
+    const btn=document.createElement('button');
+    btn.className='btn btn-muted';
+    btn.style.margin='0.25rem';
+    btn.textContent=`Versão ${historySheets.length-5+i+1}`;
+    btn.onclick=()=>{currentSheets=JSON.parse(JSON.stringify(sheetSet)); activeTab=0; renderTabList(); renderPreview();}
+    container.appendChild(btn);
+  });
 }
 
-// Função principal simulando backend seguro com fetch OpenAI
 async function generateSheetsFromAI(prompt, options){
-  // Use sua chave real aqui ou variáveis de ambiente no backend (aqui demo inline)
-  const apiKey = 'sk-proj-8yrUFfgVMqUYNuN4YaSLtavuK6Q74O243jN630QFAnjth_hE-LNijwoluXHPCjdZjFqK7cTyyT3BlbkFJc4ES6p0cFNpjb3nu_spD96JhupOxj222hsXJG6H7ytSihKfUwCUO6XWfICsYi_02IzbcTnS20A';
-
-  const system = `Você é um gerador de planilhas. Responda estritamente em JSON com sheets, name, headers, rows.`;
-  const user = `Prompt: ${prompt}\nLinhas: ${options.rows}, Colunas: ${options.cols}, Cabeçalho: ${options.headers}, Abas: ${options.sheets.join(',')}`;
-  
-  const resp = await fetch('https://api.openai.com/v1/chat/completions',{
+  const apiKey='sk-proj-8yrUFfgVMqUYNuN4YaSLtavuK6Q74O243jN630QFAnjth_hE-LNijwoluXHPCjdZjFqK7cTyyT3BlbkFJc4ES6p0cFNpjb3nu_spD96JhupOxj222hsXJG6H7ytSihKfUwCUO6XWfICsYi_02IzbcTnS20A';
+  const system=`Você é um gerador de planilhas avançado com gráficos. Responda estritamente em JSON com sheets:[{name,headers,rows}] e inclua fórmulas simples para gráficos.`;
+  const user=`Prompt: ${prompt}\nLinhas: ${options.rows}\nColunas: ${options.cols}\nCabeçalho: ${options.headers}\nAbas: ${options.sheets.join(',')}`;
+  const resp=await fetch('https://api.openai.com/v1/chat/completions',{
     method:'POST',
-    headers:{ 'Content-Type':'application/json', 'Authorization': `Bearer ${apiKey}` },
-    body: JSON.stringify({
-      model: 'gpt-4o-mini',
-      messages:[{role:'system', content:system},{role:'user', content:user}],
-      temperature:0.2
-    })
+    headers:{ 'Content-Type':'application/json','Authorization':`Bearer ${apiKey}` },
+    body:JSON.stringify({ model:'gpt-4o-mini', messages:[{role:'system',content:system},{role:'user',content:user}], temperature:0.2 })
   });
-
-  const data = await resp.json();
-  let content = data?.choices?.[0]?.message?.content || '{}';
-  
-  // Extrair JSON válido da resposta
-  const jsonMatch = content.match(/\{.*\}/s);
-  let sheets = [];
+  const data=await resp.json();
+  let content=data?.choices?.[0]?.message?.content||'{}';
+  const jsonMatch=content.match(/\{.*\}/s);
+  let sheets=[];
   if(jsonMatch){
-    try { sheets = JSON.parse(jsonMatch[0]).sheets || []; }
+    try{sheets=JSON.parse(jsonMatch[0]).sheets||[];} 
     catch(e){ sheets=[{name:'Erro', headers:['Mensagem'], rows:['JSON inválido']}]; }
-  } else { sheets=[{name:'Erro', headers:['Mensagem'], rows:['Resposta não contém JSON']}]; }
-
-  // Normalizar
+  }else{ sheets=[{name:'Erro', headers:['Mensagem'], rows:['Resposta não contém JSON']}]; }
   sheets.forEach(sheet=>{
-    sheet.name = String(sheet.name || 'Aba');
-    sheet.headers = Array.isArray(sheet.headers) ? sheet.headers.map(normalizeCell) : [];
-    sheet.rows = Array.isArray(sheet.rows) ? sheet.rows.map(r=>Array.isArray(r)?r.map(normalizeCell):[]) : [];
+    sheet.name=String(sheet.name||'Aba');
+    sheet.headers=Array.isArray(sheet.headers)?sheet.headers.map(normalizeCell):[];
+    sheet.rows=Array.isArray(sheet.rows)?sheet.rows.map(r=>Array.isArray(r)?r.map(normalizeCell):[]):[];
   });
-
   return sheets;
 }
 </script>
